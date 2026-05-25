@@ -63,6 +63,16 @@
 
 Mac 版登录成功后如果出现“系统提示”弹窗，自动化流程会继续点击 `确定`，点掉后才进入可查询状态。
 
+### `GET /mobile`
+
+手机网页控制台。配合 Tailscale 使用时，手机可访问：
+
+```text
+http://Mac的Tailscale-IP:8000/mobile
+```
+
+页面支持保存 Token、选择线路、登录、国际票价表单查询和原始查询指令输入。
+
 ### `GET /session/login-aliases`
 
 读取登录弹窗里“别名/线路”的下拉选项。
@@ -191,6 +201,19 @@ IETERM_INTERNATIONAL_FARE_COMMAND_TEMPLATE=XS FSD {origin}{destination}{airline_
 
 不同 iEterm 环境的国际票价指令可能不同。如果你的系统不是 `XS FSD`，只需要在 `.env` 里替换这个模板。
 
+### `POST /query/raw-command`
+
+执行原始查询类指令。该接口会拦截订座、出票、退票、废票等高风险指令。
+
+请求体示例：
+
+```json
+{
+  "command": "XS FSD BJSTYO/CA",
+  "parse_fares": true
+}
+```
+
 ## 运行
 
 先复制一份配置：
@@ -215,6 +238,12 @@ IETERM_AUTOMATION_BACKEND=windows uvicorn app.main:app --reload
 
 ```bash
 IETERM_AUTOMATION_BACKEND=macos uvicorn app.main:app --reload
+```
+
+如果要让手机通过 Tailscale 访问，启动时使用：
+
+```bash
+IETERM_AUTOMATION_BACKEND=macos uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 完整启动步骤：
@@ -265,6 +294,12 @@ uvicorn app.main:app --reload
 ```bash
 IETERM_MAC_APP_NAME=iEterm Mac版
 IETERM_MAC_PROCESS_NAME=
+```
+
+手机远程访问建议在 `.env` 中设置：
+
+```bash
+IETERM_MOBILE_ACCESS_TOKEN=换成你自己的密码
 ```
 
 如果活动监视器里看到的进程名和 Dock 上的应用名不同，就把真实进程名填到 `IETERM_MAC_PROCESS_NAME`。

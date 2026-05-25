@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     launch_timeout_seconds: int = 20
     post_action_delay_seconds: float = 0.5
     auto_login_enabled: bool = False
+    mobile_access_token: Optional[str] = None
     availability_command_template: str = "AV {origin} {destination} {departure_date}"
     international_fare_command_template: str = "XS FSD {origin}{destination}{airline_part}"
     credential_target: str = "ieterm/default"

@@ -10,6 +10,8 @@ from .models import (
     InternationalFareQuery,
     LoginAliasOptions,
     QueryResponse,
+    RawCommandRequest,
+    RawCommandResponse,
     SessionSnapshot,
     SessionState,
 )
@@ -19,6 +21,57 @@ from .session import SessionManager
 
 class IETermService:
     """Orchestrates session management, desktop automation, and result parsing."""
+
+    _BLOCKED_COMMAND_PREFIXES = {
+        "ETDZ",
+        "ETRF",
+        "ETRY",
+        "VT",
+        "VT:",
+        "SS",
+        "SD",
+        "NM",
+        "CT",
+        "SSR",
+        "TKTL",
+        "TKT",
+        "OSI",
+        "RMK",
+        "XE",
+        "XI",
+        "ER",
+        "RR",
+        "RF",
+    }
+    _ALLOWED_COMMAND_PREFIXES = {
+        "AV",
+        "AV:",
+        "FV",
+        "FV:",
+        "SK",
+        "SK:",
+        "FF",
+        "FF:",
+        "DSG",
+        "DSG:",
+        "FD",
+        "FD:",
+        "FSD",
+        "FSN",
+        "FSI",
+        "XS",
+        "CD",
+        "CNTD",
+        "DATE",
+        "TIME",
+        "WF",
+        "CO",
+        "CV",
+        "HELP",
+        "SIIF",
+        "RT",
+        "PAT",
+    }
 
     def __init__(
         self,
@@ -135,6 +188,42 @@ class IETermService:
             raw_text=raw_text,
         )
 
+    def run_raw_query_command(self, payload: RawCommandRequest) -> RawCommandResponse:
+        """Execute a raw query-only command after command whitelist checks."""
+        command = self._normalize_raw_command(payload.command)
+        validation_error = self._validate_raw_query_command(command)
+        if validation_error:
+            return RawCommandResponse(
+                ok=False,
+                session_state=self._session.snapshot().state,
+                error=validation_error,
+            )
+
+        snapshot = self.ensure_ready()
+        if snapshot.state != SessionState.LOGGED_IN:
+            return RawCommandResponse(
+                ok=False,
+                session_state=snapshot.state,
+                error=snapshot.note or "iEterm is not ready for raw query commands.",
+            )
+
+        self._automation.send_command(command)
+        raw_text = self._automation.read_screen_text()
+        fares = parse_fare_options(raw_text) if payload.parse_fares else []
+        self._session.update(
+            SessionState.LOGGED_IN,
+            window_detected=True,
+            last_command=command,
+            note="Raw query command completed.",
+        )
+        return RawCommandResponse(
+            ok=True,
+            session_state=SessionState.LOGGED_IN,
+            issued_command=command,
+            raw_text=raw_text,
+            fares=fares,
+        )
+
     def reset(self) -> SessionSnapshot:
         state = self._automation.reset()
         return self._session.update(state, window_detected=state != SessionState.LOGGED_OUT)
@@ -162,3 +251,23 @@ class IETermService:
             airline_part=f"/{airline}" if airline else "",
             passenger_type=passenger_type,
         )
+
+    def _normalize_raw_command(self, command: str) -> str:
+        return " ".join(command.strip().split())
+
+    def _validate_raw_query_command(self, command: str) -> str | None:
+        upper_command = command.upper()
+        first_token = self._command_prefix(upper_command)
+        blocked_tokens = {token.rstrip(":") for token in self._BLOCKED_COMMAND_PREFIXES}
+        if first_token in blocked_tokens:
+            return f"Command '{first_token}' is blocked because it may change bookings or tickets."
+
+        allowed_tokens = {token.rstrip(":") for token in self._ALLOWED_COMMAND_PREFIXES}
+        if first_token not in allowed_tokens:
+            return f"Command '{first_token}' is not in the query-only allowlist."
+
+        return None
+
+    def _command_prefix(self, upper_command: str) -> str:
+        first_token = upper_command.split(maxsplit=1)[0] if upper_command else ""
+        return first_token.split(":", 1)[0].rstrip(":")

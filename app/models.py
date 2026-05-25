@@ -106,6 +106,24 @@ class FareQueryResponse(BaseModel):
     error: Optional[str] = None
 
 
+class RawCommandRequest(BaseModel):
+    """Raw iEterm query command entered by a trusted mobile user."""
+
+    command: str = Field(min_length=1, max_length=200, description="Query-only iEterm command")
+    parse_fares: bool = True
+
+
+class RawCommandResponse(BaseModel):
+    """API response for a raw query command."""
+
+    ok: bool
+    session_state: SessionState
+    issued_command: Optional[str] = None
+    raw_text: str = ""
+    fares: list[FareOption] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
 class HealthResponse(BaseModel):
     """Minimal health-check payload."""
 

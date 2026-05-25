@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from typing import Optional
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import HTMLResponse
 
 from .automation_windows import AutomationError, build_automation
 from .config import settings
 from .executor import IETermService
+from .mobile import render_mobile_console
 from .models import (
     FareQueryResponse,
     FlightQuery,
@@ -12,6 +16,8 @@ from .models import (
     InternationalFareQuery,
     LoginAliasOptions,
     QueryResponse,
+    RawCommandRequest,
+    RawCommandResponse,
     SelectLoginAliasRequest,
     SessionSnapshot,
 )
@@ -28,12 +34,29 @@ service = IETermService(
 )
 
 
+def require_mobile_token(
+    x_ieterm_token: Optional[str] = Header(default=None, alias="X-IETERM-Token"),
+    token: Optional[str] = Query(default=None),
+) -> None:
+    expected_token = settings.mobile_access_token
+    if not expected_token:
+        return
+    supplied_token = x_ieterm_token or token
+    if supplied_token != expected_token:
+        raise HTTPException(status_code=401, detail="Invalid or missing access token.")
+
+
+@app.get("/mobile", response_class=HTMLResponse)
+def mobile_console() -> HTMLResponse:
+    return HTMLResponse(render_mobile_console())
+
+
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(service=settings.service_name, status="ok")
 
 
-@app.get("/session/status", response_model=SessionSnapshot)
+@app.get("/session/status", response_model=SessionSnapshot, dependencies=[Depends(require_mobile_token)])
 def session_status() -> SessionSnapshot:
     try:
         return service.session_status()
@@ -41,7 +64,7 @@ def session_status() -> SessionSnapshot:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/session/ensure-ready", response_model=SessionSnapshot)
+@app.post("/session/ensure-ready", response_model=SessionSnapshot, dependencies=[Depends(require_mobile_token)])
 def ensure_ready() -> SessionSnapshot:
     try:
         return service.ensure_ready()
@@ -49,7 +72,7 @@ def ensure_ready() -> SessionSnapshot:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/session/login", response_model=SessionSnapshot)
+@app.post("/session/login", response_model=SessionSnapshot, dependencies=[Depends(require_mobile_token)])
 def login() -> SessionSnapshot:
     try:
         return service.login()
@@ -57,7 +80,7 @@ def login() -> SessionSnapshot:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.get("/session/login-aliases", response_model=LoginAliasOptions)
+@app.get("/session/login-aliases", response_model=LoginAliasOptions, dependencies=[Depends(require_mobile_token)])
 def login_aliases() -> LoginAliasOptions:
     try:
         return service.list_login_aliases()
@@ -65,7 +88,7 @@ def login_aliases() -> LoginAliasOptions:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/session/login-alias", response_model=LoginAliasOptions)
+@app.post("/session/login-alias", response_model=LoginAliasOptions, dependencies=[Depends(require_mobile_token)])
 def select_login_alias(payload: SelectLoginAliasRequest) -> LoginAliasOptions:
     try:
         return service.select_login_alias(payload.alias)
@@ -73,7 +96,7 @@ def select_login_alias(payload: SelectLoginAliasRequest) -> LoginAliasOptions:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/session/reset", response_model=SessionSnapshot)
+@app.post("/session/reset", response_model=SessionSnapshot, dependencies=[Depends(require_mobile_token)])
 def reset() -> SessionSnapshot:
     try:
         return service.reset()
@@ -81,7 +104,7 @@ def reset() -> SessionSnapshot:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/query/flight", response_model=QueryResponse)
+@app.post("/query/flight", response_model=QueryResponse, dependencies=[Depends(require_mobile_token)])
 def query_flight(payload: FlightQuery) -> QueryResponse:
     try:
         return service.query_flight(payload)
@@ -89,9 +112,17 @@ def query_flight(payload: FlightQuery) -> QueryResponse:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/query/international-fare", response_model=FareQueryResponse)
+@app.post("/query/international-fare", response_model=FareQueryResponse, dependencies=[Depends(require_mobile_token)])
 def query_international_fare(payload: InternationalFareQuery) -> FareQueryResponse:
     try:
         return service.query_international_fare(payload)
+    except AutomationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/query/raw-command", response_model=RawCommandResponse, dependencies=[Depends(require_mobile_token)])
+def query_raw_command(payload: RawCommandRequest) -> RawCommandResponse:
+    try:
+        return service.run_raw_query_command(payload)
     except AutomationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
