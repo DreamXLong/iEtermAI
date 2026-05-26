@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import platform
 import subprocess
+import tempfile
 import time
 from abc import ABC, abstractmethod
 from typing import Any
@@ -49,6 +50,14 @@ class IETermAutomation(ABC):
     def reset(self) -> SessionState:
         raise NotImplementedError
 
+    @abstractmethod
+    def close_app(self) -> SessionState:
+        raise NotImplementedError
+
+    @abstractmethod
+    def capture_screenshot_png(self) -> bytes:
+        raise NotImplementedError
+
 
 class MockIETermAutomation(IETermAutomation):
     """Development backend that lets the API run without Windows or iEterm."""
@@ -91,6 +100,19 @@ class MockIETermAutomation(IETermAutomation):
     def reset(self) -> SessionState:
         self._state = SessionState.LOGGED_IN
         return self._state
+
+    def close_app(self) -> SessionState:
+        self._state = SessionState.LOGGED_OUT
+        return self._state
+
+    def capture_screenshot_png(self) -> bytes:
+        return (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+            b"\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4"
+            b"\x89\x00\x00\x00\x0cIDATx\x9cc\xf8\xff\xff?\x00"
+            b"\x05\xfe\x02\xfeA\xd1\x1d\xb5\x00\x00\x00\x00IEND"
+            b"\xaeB`\x82"
+        )
 
 
 class WindowsIETermAutomation(IETermAutomation):
@@ -203,6 +225,19 @@ class WindowsIETermAutomation(IETermAutomation):
         self._ensure_windows()
         self._window = None
         return self.detect_state()
+
+    def close_app(self) -> SessionState:
+        self._ensure_windows()
+        window = self._resolve_window()
+        if window is None:
+            return SessionState.LOGGED_OUT
+        window.close()
+        time.sleep(self._settings.post_action_delay_seconds)
+        self._window = None
+        return self.detect_state()
+
+    def capture_screenshot_png(self) -> bytes:
+        raise AutomationError("Screenshot capture is currently implemented for macOS only.")
 
     def _resolve_window(self) -> Any | None:
         try:
@@ -331,7 +366,8 @@ class MacOSIETermAutomation(IETermAutomation):
         if not self._is_app_running():
             return SessionState.LOGGED_OUT
 
-        if self._has_login_dialog():
+        window_contents = self._window_contents_text()
+        if self._has_login_dialog(window_contents):
             return SessionState.LOGIN_SCREEN
         screen_text = self.read_screen_text()
         if self._contains_any(screen_text, self._settings.login_keywords):
@@ -366,6 +402,7 @@ class MacOSIETermAutomation(IETermAutomation):
 
         current_state = self.detect_state()
         if current_state == SessionState.LOGGED_IN:
+            self._confirm_system_prompt_if_present(use_enter_fallback=True)
             return current_state
         if current_state not in {SessionState.LOGIN_SCREEN, SessionState.SESSION_EXPIRED}:
             return current_state
@@ -376,7 +413,7 @@ class MacOSIETermAutomation(IETermAutomation):
             self._confirm_system_prompt_if_present(use_enter_fallback=True)
             state = self.detect_state()
             if state != SessionState.LOGIN_SCREEN:
-                self._confirm_system_prompt_if_present(use_enter_fallback=False)
+                self._confirm_system_prompt_if_present(use_enter_fallback=True)
                 return state
             time.sleep(0.5)
         return self.detect_state()
@@ -430,6 +467,39 @@ class MacOSIETermAutomation(IETermAutomation):
         self._ensure_macos()
         return self.detect_state()
 
+    def close_app(self) -> SessionState:
+        self._ensure_macos()
+        if not self._is_app_running():
+            return SessionState.LOGGED_OUT
+
+        self._activate_app()
+        self._request_app_close()
+        deadline = time.monotonic() + self._settings.command_timeout_seconds
+        while time.monotonic() < deadline:
+            self._confirm_close_prompt_if_present()
+            if not self._is_app_running():
+                return SessionState.LOGGED_OUT
+            time.sleep(0.5)
+        return self.detect_state()
+
+    def capture_screenshot_png(self) -> bytes:
+        self._ensure_macos()
+        try:
+            if self._is_app_running():
+                self._activate_app()
+        except AutomationError:
+            # A screenshot is still useful even when process detection is wrong.
+            pass
+
+        try:
+            with tempfile.TemporaryDirectory() as screenshot_dir:
+                screenshot_path = f"{screenshot_dir}/ieterm-screen.png"
+                subprocess.run(["screencapture", "-x", screenshot_path], check=True, timeout=8)
+                with open(screenshot_path, "rb") as screenshot:
+                    return screenshot.read()
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise AutomationError("Failed to capture the current screen. Check macOS Screen Recording permission.") from exc
+
     def _activate_app(self) -> None:
         self._run_osascript(f'tell application "{self._settings.mac_app_name}" to activate')
         time.sleep(self._settings.post_action_delay_seconds)
@@ -443,28 +513,32 @@ class MacOSIETermAutomation(IETermAutomation):
         '''
         return self._run_osascript(script).strip().lower() == "true"
 
-    def _has_login_dialog(self) -> bool:
+    def _window_contents_text(self) -> str:
         process_name = self._applescript_text(self._process_name())
         script = f'''
         tell application "System Events"
             tell process "{process_name}"
-                if not (exists window 1) then return false
-                repeat with uiElement in entire contents of window 1
-                    try
-                        if (class of uiElement as text) is "button" then
-                            set itemName to name of uiElement as text
-                            if itemName is "登 录" or itemName is "登录" then return true
-                        end if
-                    end try
-                end repeat
-                return false
+                if not (exists window 1) then return ""
+                return entire contents of window 1
             end tell
         end tell
         '''
         try:
-            return self._run_osascript(script).strip().lower() == "true"
+            return self._run_osascript(script)
         except AutomationError:
-            return False
+            return ""
+
+    def _has_login_dialog(self, window_contents: str | None = None) -> bool:
+        contents = window_contents if window_contents is not None else self._window_contents_text()
+        login_markers = (
+            "Eterm登录信息",
+            "别名：",
+            "用户名：",
+            "密码：",
+            "服务器：",
+            "登 录",
+        )
+        return any(marker in contents for marker in login_markers)
 
     def _read_login_alias_popup(self) -> tuple[str | None, list[str]]:
         process_name = self._applescript_text(self._process_name())
@@ -550,22 +624,51 @@ class MacOSIETermAutomation(IETermAutomation):
                 if not (exists window 1) then error "No iEterm window found."
                 try
                     click button "登 录" of UI element 1 of scroll area 1 of UI element 1 of scroll area 1 of group 1 of group 1 of group 1 of window 1
-                on error
-                    try
-                        click button "登录" of UI element 1 of scroll area 1 of UI element 1 of scroll area 1 of group 1 of group 1 of group 1 of window 1
-                    on error
-                        error "Login button was not found."
-                    end try
+                    return
                 end try
+                try
+                    click button "登录" of UI element 1 of scroll area 1 of UI element 1 of scroll area 1 of group 1 of group 1 of group 1 of window 1
+                    return
+                end try
+                repeat with uiElement in entire contents of window 1
+                    try
+                        set itemName to name of uiElement as text
+                        if itemName contains "登" and itemName contains "录" then
+                            click uiElement
+                            return
+                        end if
+                    end try
+                end repeat
+                error "Login button was not found."
             end tell
         end tell
         '''
         self._run_osascript(script)
         time.sleep(self._settings.post_action_delay_seconds)
 
-    def _confirm_system_prompt_if_present(self, *, use_enter_fallback: bool = False) -> None:
+    def _request_app_close(self) -> None:
         process_name = self._applescript_text(self._process_name())
-        enter_fallback = "key code 36" if use_enter_fallback else ""
+        script = f'''
+        tell application "{self._settings.mac_app_name}" to activate
+        tell application "System Events"
+            tell process "{process_name}"
+                set frontmost to true
+                delay 0.2
+                try
+                    if exists window 1 then
+                        click button 1 of window 1
+                        return
+                    end if
+                end try
+                keystroke "q" using command down
+            end tell
+        end tell
+        '''
+        self._run_osascript(script)
+        time.sleep(self._settings.post_action_delay_seconds)
+
+    def _confirm_close_prompt_if_present(self) -> None:
+        process_name = self._applescript_text(self._process_name())
         script = f'''
         tell application "System Events"
             tell process "{process_name}"
@@ -573,21 +676,178 @@ class MacOSIETermAutomation(IETermAutomation):
                 if not (exists window 1) then return
                 repeat with uiElement in entire contents of window 1
                     try
-                        if (class of uiElement as text) is "button" then
-                            set itemName to name of uiElement as text
-                            if itemName is "确定" then
-                                click uiElement
-                                return
-                            end if
+                        set itemName to name of uiElement as text
+                        if itemName is "是" or itemName is "Yes" or itemName is "确定" then
+                            click uiElement
+                            return
                         end if
                     end try
                 end repeat
-                {enter_fallback}
+                key code 36
             end tell
         end tell
         '''
         self._run_osascript(script)
+        self._click_system_prompt_by_screenshot()
         time.sleep(self._settings.post_action_delay_seconds)
+
+    def _confirm_system_prompt_if_present(self, *, use_enter_fallback: bool = False) -> None:
+        process_name = self._applescript_text(self._process_name())
+        enter_fallback = "key code 36" if use_enter_fallback else ""
+        coordinate_fallback = self._confirm_prompt_coordinate_script() if use_enter_fallback else ""
+        script = f'''
+        tell application "System Events"
+            tell process "{process_name}"
+                set frontmost to true
+                if not (exists window 1) then return
+                repeat with uiElement in entire contents of window 1
+                    try
+                        set itemName to name of uiElement as text
+                        if itemName is "确定" then
+                            click uiElement
+                            return
+                        end if
+                    end try
+                end repeat
+                {enter_fallback}
+                delay 0.2
+                {coordinate_fallback}
+            end tell
+        end tell
+        '''
+        self._run_osascript(script)
+        if use_enter_fallback:
+            self._click_system_prompt_by_screenshot()
+        time.sleep(self._settings.post_action_delay_seconds)
+
+    def _confirm_prompt_coordinate_script(self) -> str:
+        # The login success prompt is drawn inside iEterm's canvas, so it does
+        # not always expose a normal macOS button. The default "确定" button sits
+        # near the center-left terminal panel; this click is a last-resort noop
+        # when the prompt is absent.
+        return '''
+                try
+                    set winPos to position of window 1
+                    set winSize to size of window 1
+                    set clickX to (item 1 of winPos) + ((item 1 of winSize) * 0.36)
+                    set clickY to (item 2 of winPos) + ((item 2 of winSize) * 0.63)
+                    click at {clickX, clickY}
+                end try
+        '''
+
+    def _click_system_prompt_by_screenshot(self) -> None:
+        """Find and click the drawn blue "确定" button when it is not an AX button."""
+        swift_script = r'''
+import Foundation
+import CoreGraphics
+import ImageIO
+
+guard CommandLine.arguments.count > 1 else { exit(0) }
+let imageURL = URL(fileURLWithPath: CommandLine.arguments[1])
+guard
+    let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil),
+    let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+else { exit(0) }
+
+let width = image.width
+let height = image.height
+let bytesPerRow = width * 4
+var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+guard let context = CGContext(
+    data: &pixels,
+    width: width,
+    height: height,
+    bitsPerComponent: 8,
+    bytesPerRow: bytesPerRow,
+    space: CGColorSpaceCreateDeviceRGB(),
+    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+) else { exit(0) }
+context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+func isPromptBlue(_ x: Int, _ y: Int) -> Bool {
+    let offset = y * bytesPerRow + x * 4
+    let r = pixels[offset]
+    let g = pixels[offset + 1]
+    let b = pixels[offset + 2]
+    return b > 130 && g > 80 && b > r + 40 && g > r + 20
+}
+
+let minX = max(0, Int(Double(width) * 0.15))
+let maxX = min(width - 1, Int(Double(width) * 0.80))
+let minY = max(0, Int(Double(height) * 0.25))
+let maxY = min(height - 1, Int(Double(height) * 0.80))
+var visited = [UInt8](repeating: 0, count: width * height)
+var best: (count: Int, minX: Int, minY: Int, maxX: Int, maxY: Int)?
+
+for y in minY...maxY {
+    for x in minX...maxX {
+        let index = y * width + x
+        if visited[index] != 0 || !isPromptBlue(x, y) { continue }
+
+        var stack = [(x, y)]
+        visited[index] = 1
+        var count = 0
+        var cMinX = x
+        var cMaxX = x
+        var cMinY = y
+        var cMaxY = y
+
+        while let (cx, cy) = stack.popLast() {
+            count += 1
+            cMinX = min(cMinX, cx)
+            cMaxX = max(cMaxX, cx)
+            cMinY = min(cMinY, cy)
+            cMaxY = max(cMaxY, cy)
+            for (nx, ny) in [(cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)] {
+                if nx < minX || nx > maxX || ny < minY || ny > maxY { continue }
+                let nIndex = ny * width + nx
+                if visited[nIndex] != 0 || !isPromptBlue(nx, ny) { continue }
+                visited[nIndex] = 1
+                stack.append((nx, ny))
+            }
+        }
+
+        let compWidth = cMaxX - cMinX + 1
+        let compHeight = cMaxY - cMinY + 1
+        if count > 100 && compWidth >= 20 && compWidth <= 220 && compHeight >= 10 && compHeight <= 90 {
+            if best == nil || count > best!.count {
+                best = (count, cMinX, cMinY, cMaxX, cMaxY)
+            }
+        }
+    }
+}
+
+guard let target = best else { exit(0) }
+let centerX = Double(target.minX + target.maxX) / 2.0
+let centerY = Double(target.minY + target.maxY) / 2.0
+let displayBounds = CGDisplayBounds(CGMainDisplayID())
+let scaleX = Double(width) / Double(displayBounds.width)
+let scaleY = Double(height) / Double(displayBounds.height)
+let point = CGPoint(x: centerX / scaleX, y: centerY / scaleY)
+
+let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)
+let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)
+let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
+move?.post(tap: .cghidEventTap)
+Thread.sleep(forTimeInterval: 0.05)
+down?.post(tap: .cghidEventTap)
+Thread.sleep(forTimeInterval: 0.08)
+up?.post(tap: .cghidEventTap)
+'''
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".png") as screenshot:
+                subprocess.run(["screencapture", "-x", screenshot.name], check=True)
+                subprocess.run(
+                    ["swift", "-", screenshot.name],
+                    input=swift_script,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                )
+        except Exception:
+            # Screenshot clicking is only a last-resort fallback; keep login flow moving.
+            return
 
     def _paste_text(self, text: str) -> None:
         try:

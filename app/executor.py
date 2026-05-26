@@ -228,6 +228,19 @@ class IETermService:
         state = self._automation.reset()
         return self._session.update(state, window_detected=state != SessionState.LOGGED_OUT)
 
+    def close_app(self) -> SessionSnapshot:
+        """Close the desktop client and update the tracked session state."""
+        state = self._automation.close_app()
+        return self._session.update(
+            state,
+            window_detected=state != SessionState.LOGGED_OUT,
+            note="iEterm closed by automation." if state == SessionState.LOGGED_OUT else "iEterm close was requested.",
+        )
+
+    def capture_screenshot_png(self) -> bytes:
+        """Return a PNG screenshot of the current desktop client state."""
+        return self._automation.capture_screenshot_png()
+
     def _build_availability_command(self, origin: str, destination: str, departure_date: date) -> str:
         # Keep command construction centralized so the same template is reused
         # by the API, CLI wrappers, and future tool integrations.

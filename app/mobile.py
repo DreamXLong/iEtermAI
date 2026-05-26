@@ -21,23 +21,42 @@ def render_mobile_console() -> str:
     input, select, textarea { border: 1px solid #cfd7e6; padding: 12px; background: #fff; color: #172033; }
     textarea { min-height: 120px; resize: vertical; }
     button { border: 0; padding: 12px; margin-top: 12px; background: #1769ff; color: white; font-weight: 700; }
+    button:disabled { background: #98a2b3; color: #eef2f6; }
     button.secondary { background: #526071; }
+    button.danger { background: #c62828; }
     pre { white-space: pre-wrap; word-break: break-word; background: #101828; color: #d6e4ff; padding: 12px; border-radius: 10px; overflow: auto; }
+    img.screenshot { display: none; width: 100%; border-radius: 12px; border: 1px solid #cfd7e6; background: #101828; }
+    img.screenshot.active { display: block; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .hint { color: #667085; font-size: 13px; line-height: 1.5; }
     .ok { color: #07883d; font-weight: 700; }
     .bad { color: #c62828; font-weight: 700; }
+    .loading {
+      display: none; position: sticky; top: 8px; z-index: 10; margin-bottom: 12px;
+      padding: 12px; border-radius: 12px; background: #fff4d6; color: #7a4b00; font-weight: 700;
+      box-shadow: 0 8px 20px rgba(122, 75, 0, .12);
+    }
+    .loading.active { display: flex; align-items: center; gap: 10px; }
+    .spinner {
+      width: 18px; height: 18px; border: 3px solid rgba(122, 75, 0, .2);
+      border-top-color: #7a4b00; border-radius: 50%; animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
     @media (prefers-color-scheme: dark) {
       body { background: #101828; color: #f4f7fb; }
       section { background: #182230; }
       input, select, textarea { background: #101828; color: #f4f7fb; border-color: #344054; }
+      img.screenshot { border-color: #344054; }
       .hint { color: #a8b3c7; }
+      .loading { background: #3b2b08; color: #ffd778; }
+      .spinner { border-color: rgba(255, 215, 120, .25); border-top-color: #ffd778; }
     }
   </style>
 </head>
 <body>
 <main>
   <h1>iEtermAI 手机查票</h1>
+  <div id="loading" class="loading"><span class="spinner"></span><span id="loadingText">执行中...</span></div>
 
   <section>
     <h2>访问密码</h2>
@@ -55,6 +74,7 @@ def render_mobile_console() -> str:
     <select id="alias"></select>
     <button onclick="selectAlias()">选择线路</button>
     <button onclick="login()">登录并确认系统提示</button>
+    <button class="danger" onclick="closeApp()">关闭 iEterm</button>
     <div id="status" class="hint">状态：未刷新</div>
   </section>
 
@@ -85,11 +105,23 @@ def render_mobile_console() -> str:
     <h2>结果</h2>
     <pre id="output">暂无结果</pre>
   </section>
+
+  <section>
+    <h2>当前 iEterm 截图</h2>
+    <button class="secondary" onclick="refreshScreenshot()">手动刷新截图</button>
+    <p id="screenshotHint" class="hint">每次操作完成后会自动刷新。建议把 iEterm 窗口撑满，并保持在最前面。</p>
+    <img id="screenshot" class="screenshot" alt="当前 iEterm 状态截图" />
+  </section>
 </main>
 
 <script>
 const output = document.getElementById("output");
 const statusBox = document.getElementById("status");
+const loadingBox = document.getElementById("loading");
+const loadingText = document.getElementById("loadingText");
+const screenshot = document.getElementById("screenshot");
+const screenshotHint = document.getElementById("screenshotHint");
+let screenshotObjectUrl = null;
 
 document.getElementById("token").value = localStorage.getItem("ieterm_token") || "";
 document.getElementById("departure_date").valueAsDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
@@ -118,16 +150,51 @@ function show(data) {
   output.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
 }
 
-async function loadStatus() {
+function setLoading(active, message = "执行中...") {
+  loadingText.textContent = message;
+  loadingBox.classList.toggle("active", active);
+  for (const button of document.querySelectorAll("button")) {
+    button.disabled = active;
+  }
+}
+
+async function withLoading(message, task) {
+  setLoading(true, message);
+  output.textContent = `${message}\\n请稍等，不要重复点击...`;
   try {
+    return await task();
+  } finally {
+    await refreshScreenshot({silent: true});
+    setLoading(false);
+  }
+}
+
+async function refreshScreenshot(options = {}) {
+  try {
+    const response = await fetch(`/session/screenshot?t=${Date.now()}`, {headers: tokenHeaders()});
+    if (!response.ok) throw new Error(await response.text());
+    const blob = await response.blob();
+    if (screenshotObjectUrl) URL.revokeObjectURL(screenshotObjectUrl);
+    screenshotObjectUrl = URL.createObjectURL(blob);
+    screenshot.src = screenshotObjectUrl;
+    screenshot.classList.add("active");
+    screenshotHint.textContent = `截图已更新：${new Date().toLocaleTimeString()}`;
+  } catch (error) {
+    if (!options.silent) show(String(error));
+    screenshotHint.textContent = "暂时无法获取截图，请确认 iEterm 已打开并且服务有屏幕录制/辅助功能权限。";
+  }
+}
+
+async function loadStatus() {
+  return withLoading("正在刷新登录状态...", async () => {
     const data = await api("/session/status", {method: "GET"});
     statusBox.innerHTML = `状态：<span class="${data.state === "logged_in" ? "ok" : "bad"}">${data.state}</span>`;
     show(data);
-  } catch (error) { show(String(error)); }
+  }).catch(error => show(String(error)));
 }
 
 async function loadAliases() {
-  try {
+  return withLoading("正在读取线路列表...", async () => {
     const data = await api("/session/login-aliases", {method: "GET"});
     const aliasSelect = document.getElementById("alias");
     aliasSelect.innerHTML = "";
@@ -139,26 +206,35 @@ async function loadAliases() {
       aliasSelect.appendChild(option);
     }
     show(data);
-  } catch (error) { show(String(error)); }
+  }).catch(error => show(String(error)));
 }
 
 async function selectAlias() {
-  try {
+  return withLoading("正在选择线路...", async () => {
     const alias = document.getElementById("alias").value;
     show(await api("/session/login-alias", {method: "POST", body: JSON.stringify({alias})}));
-  } catch (error) { show(String(error)); }
+  }).catch(error => show(String(error)));
 }
 
 async function login() {
-  try {
+  return withLoading("正在登录并确认系统提示...", async () => {
     const data = await api("/session/login", {method: "POST", body: "{}"});
     statusBox.innerHTML = `状态：<span class="${data.state === "logged_in" ? "ok" : "bad"}">${data.state}</span>`;
     show(data);
-  } catch (error) { show(String(error)); }
+  }).catch(error => show(String(error)));
+}
+
+async function closeApp() {
+  if (!confirm("确定要关闭电脑上的 iEterm 吗？")) return;
+  return withLoading("正在关闭 iEterm 并确认弹窗...", async () => {
+    const data = await api("/session/close", {method: "POST", body: "{}"});
+    statusBox.innerHTML = `状态：<span class="${data.state === "logged_out" ? "ok" : "bad"}">${data.state}</span>`;
+    show(data);
+  }).catch(error => show(String(error)));
 }
 
 async function queryFare() {
-  try {
+  return withLoading("正在查询国际票价...", async () => {
     const payload = {
       origin: document.getElementById("origin").value.trim().toUpperCase(),
       destination: document.getElementById("destination").value.trim().toUpperCase(),
@@ -167,14 +243,14 @@ async function queryFare() {
       passenger_type: document.getElementById("passenger_type").value.trim().toUpperCase() || "ADT"
     };
     show(await api("/query/international-fare", {method: "POST", body: JSON.stringify(payload)}));
-  } catch (error) { show(String(error)); }
+  }).catch(error => show(String(error)));
 }
 
 async function runRawCommand() {
-  try {
+  return withLoading("正在发送原始查询指令...", async () => {
     const command = document.getElementById("command").value.trim();
     show(await api("/query/raw-command", {method: "POST", body: JSON.stringify({command, parse_fares: true})}));
-  } catch (error) { show(String(error)); }
+  }).catch(error => show(String(error)));
 }
 </script>
 </body>

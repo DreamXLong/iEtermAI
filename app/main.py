@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 from .automation_windows import AutomationError, build_automation
 from .config import settings
@@ -102,6 +102,29 @@ def reset() -> SessionSnapshot:
         return service.reset()
     except AutomationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/session/close", response_model=SessionSnapshot, dependencies=[Depends(require_mobile_token)])
+def close_app() -> SessionSnapshot:
+    try:
+        return service.close_app()
+    except AutomationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/session/screenshot", dependencies=[Depends(require_mobile_token)])
+def session_screenshot() -> Response:
+    try:
+        image = service.capture_screenshot_png()
+    except AutomationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not image:
+        raise HTTPException(status_code=404, detail="iEterm screenshot is not available.")
+    return Response(
+        content=image,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post("/query/flight", response_model=QueryResponse, dependencies=[Depends(require_mobile_token)])
