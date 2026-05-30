@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     password_control: Optional[str] = None
     submit_control: Optional[str] = None
     login_keywords: str = "登录,login,sign in,password"
-    session_expired_keywords: str = "超时,expired,session expired,relogin,重新登录"
+    session_expired_keywords: str = "超时,expired,session expired,relogin,重新登录,用户异常,请重新登录"
     mock_screen_text: str = (
         "MU5101 0800 1015 Y9\n"
         "CA1501 0930 1145 Y4\n"

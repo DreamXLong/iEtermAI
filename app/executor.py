@@ -6,6 +6,7 @@ from .automation_windows import IETermAutomation
 from .config import Settings
 from .models import (
     FareQueryResponse,
+    FareCalculationResponse,
     FlightQuery,
     InternationalFareQuery,
     LoginAliasOptions,
@@ -21,57 +22,6 @@ from .session import SessionManager
 
 class IETermService:
     """Orchestrates session management, desktop automation, and result parsing."""
-
-    _BLOCKED_COMMAND_PREFIXES = {
-        "ETDZ",
-        "ETRF",
-        "ETRY",
-        "VT",
-        "VT:",
-        "SS",
-        "SD",
-        "NM",
-        "CT",
-        "SSR",
-        "TKTL",
-        "TKT",
-        "OSI",
-        "RMK",
-        "XE",
-        "XI",
-        "ER",
-        "RR",
-        "RF",
-    }
-    _ALLOWED_COMMAND_PREFIXES = {
-        "AV",
-        "AV:",
-        "FV",
-        "FV:",
-        "SK",
-        "SK:",
-        "FF",
-        "FF:",
-        "DSG",
-        "DSG:",
-        "FD",
-        "FD:",
-        "FSD",
-        "FSN",
-        "FSI",
-        "XS",
-        "CD",
-        "CNTD",
-        "DATE",
-        "TIME",
-        "WF",
-        "CO",
-        "CV",
-        "HELP",
-        "SIIF",
-        "RT",
-        "PAT",
-    }
 
     def __init__(
         self,
@@ -145,6 +95,20 @@ class IETermService:
         command = self._build_availability_command(payload.origin, payload.destination, payload.departure_date)
         self._automation.send_command(command)
         raw_text = self._automation.read_screen_text()
+        if self._is_session_expired_text(raw_text):
+            self._session.update(
+                SessionState.SESSION_EXPIRED,
+                window_detected=True,
+                last_command=command,
+                note="iEterm reported an abnormal user state. Login again before querying.",
+            )
+            return QueryResponse(
+                ok=False,
+                session_state=SessionState.SESSION_EXPIRED,
+                issued_command=command,
+                raw_text=raw_text,
+                error="iEterm 提示用户异常，需要重新登录。",
+            )
         flights = parse_flight_options(raw_text)
         self._session.update(
             SessionState.LOGGED_IN,
@@ -173,6 +137,20 @@ class IETermService:
         command = self._build_international_fare_command(payload)
         self._automation.send_command(command)
         raw_text = self._automation.read_screen_text()
+        if self._is_session_expired_text(raw_text):
+            self._session.update(
+                SessionState.SESSION_EXPIRED,
+                window_detected=True,
+                last_command=command,
+                note="iEterm reported an abnormal user state. Login again before querying.",
+            )
+            return FareQueryResponse(
+                ok=False,
+                session_state=SessionState.SESSION_EXPIRED,
+                issued_command=command,
+                raw_text=raw_text,
+                error="iEterm 提示用户异常，需要重新登录。",
+            )
         fares = parse_fare_options(raw_text)
         self._session.update(
             SessionState.LOGGED_IN,
@@ -189,7 +167,7 @@ class IETermService:
         )
 
     def run_raw_query_command(self, payload: RawCommandRequest) -> RawCommandResponse:
-        """Execute a raw query-only command after command whitelist checks."""
+        """Execute a raw command entered by a trusted mobile user."""
         command = self._normalize_raw_command(payload.command)
         validation_error = self._validate_raw_query_command(command)
         if validation_error:
@@ -209,6 +187,20 @@ class IETermService:
 
         self._automation.send_command(command)
         raw_text = self._automation.read_screen_text()
+        if self._is_session_expired_text(raw_text):
+            self._session.update(
+                SessionState.SESSION_EXPIRED,
+                window_detected=True,
+                last_command=command,
+                note="iEterm reported an abnormal user state. Login again before querying.",
+            )
+            return RawCommandResponse(
+                ok=False,
+                session_state=SessionState.SESSION_EXPIRED,
+                issued_command=command,
+                raw_text=raw_text,
+                error="iEterm 提示用户异常，需要重新登录。",
+            )
         fares = parse_fare_options(raw_text) if payload.parse_fares else []
         self._session.update(
             SessionState.LOGGED_IN,
@@ -222,6 +214,28 @@ class IETermService:
             issued_command=command,
             raw_text=raw_text,
             fares=fares,
+        )
+
+    def copy_fare_calculation_text(self) -> FareCalculationResponse:
+        """Click fare calculation and return the popup text copied by iEterm."""
+        snapshot = self.ensure_ready()
+        if snapshot.state != SessionState.LOGGED_IN:
+            return FareCalculationResponse(
+                ok=False,
+                session_state=snapshot.state,
+                error=snapshot.note or "iEterm is not ready for fare calculation.",
+            )
+
+        raw_text = self._automation.copy_fare_calculation_text()
+        self._session.update(
+            SessionState.LOGGED_IN,
+            window_detected=True,
+            note="Fare calculation popup copied.",
+        )
+        return FareCalculationResponse(
+            ok=True,
+            session_state=SessionState.LOGGED_IN,
+            raw_text=raw_text,
         )
 
     def reset(self) -> SessionSnapshot:
@@ -269,18 +283,10 @@ class IETermService:
         return " ".join(command.strip().split())
 
     def _validate_raw_query_command(self, command: str) -> str | None:
-        upper_command = command.upper()
-        first_token = self._command_prefix(upper_command)
-        blocked_tokens = {token.rstrip(":") for token in self._BLOCKED_COMMAND_PREFIXES}
-        if first_token in blocked_tokens:
-            return f"Command '{first_token}' is blocked because it may change bookings or tickets."
+        return None if command else "Command cannot be empty."
 
-        allowed_tokens = {token.rstrip(":") for token in self._ALLOWED_COMMAND_PREFIXES}
-        if first_token not in allowed_tokens:
-            return f"Command '{first_token}' is not in the query-only allowlist."
+    def _is_session_expired_text(self, text: str) -> bool:
+        normalized_text = text.lower()
+        keywords = [keyword.strip().lower() for keyword in self._settings.session_expired_keywords.split(",") if keyword.strip()]
+        return any(keyword in normalized_text for keyword in keywords)
 
-        return None
-
-    def _command_prefix(self, upper_command: str) -> str:
-        first_token = upper_command.split(maxsplit=1)[0] if upper_command else ""
-        return first_token.split(":", 1)[0].rstrip(":")

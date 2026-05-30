@@ -11,6 +11,7 @@ from .executor import IETermService
 from .mobile import render_mobile_console
 from .models import (
     FareQueryResponse,
+    FareCalculationResponse,
     FlightQuery,
     HealthResponse,
     InternationalFareQuery,
@@ -147,5 +148,13 @@ def query_international_fare(payload: InternationalFareQuery) -> FareQueryRespon
 def query_raw_command(payload: RawCommandRequest) -> RawCommandResponse:
     try:
         return service.run_raw_query_command(payload)
+    except AutomationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/query/fare-calculation", response_model=FareCalculationResponse, dependencies=[Depends(require_mobile_token)])
+def copy_fare_calculation() -> FareCalculationResponse:
+    try:
+        return service.copy_fare_calculation_text()
     except AutomationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

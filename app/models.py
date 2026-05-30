@@ -107,9 +107,9 @@ class FareQueryResponse(BaseModel):
 
 
 class RawCommandRequest(BaseModel):
-    """Raw iEterm query command entered by a trusted mobile user."""
+    """Raw iEterm command entered by a trusted mobile user."""
 
-    command: str = Field(min_length=1, max_length=200, description="Query-only iEterm command")
+    command: str = Field(min_length=1, max_length=200, description="Raw iEterm command")
     parse_fares: bool = True
 
 
@@ -121,6 +121,15 @@ class RawCommandResponse(BaseModel):
     issued_command: Optional[str] = None
     raw_text: str = ""
     fares: list[FareOption] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+class FareCalculationResponse(BaseModel):
+    """API response for copied fare calculation popup text."""
+
+    ok: bool
+    session_state: SessionState
+    raw_text: str = ""
     error: Optional[str] = None
 
 

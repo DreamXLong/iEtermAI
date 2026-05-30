@@ -58,6 +58,10 @@ class IETermAutomation(ABC):
     def capture_screenshot_png(self) -> bytes:
         raise NotImplementedError
 
+    @abstractmethod
+    def copy_fare_calculation_text(self) -> str:
+        raise NotImplementedError
+
 
 class MockIETermAutomation(IETermAutomation):
     """Development backend that lets the API run without Windows or iEterm."""
@@ -113,6 +117,9 @@ class MockIETermAutomation(IETermAutomation):
             b"\x05\xfe\x02\xfeA\xd1\x1d\xb5\x00\x00\x00\x00IEND"
             b"\xaeB`\x82"
         )
+
+    def copy_fare_calculation_text(self) -> str:
+        return "模拟票价计算内容"
 
 
 class WindowsIETermAutomation(IETermAutomation):
@@ -238,6 +245,9 @@ class WindowsIETermAutomation(IETermAutomation):
 
     def capture_screenshot_png(self) -> bytes:
         raise AutomationError("Screenshot capture is currently implemented for macOS only.")
+
+    def copy_fare_calculation_text(self) -> str:
+        raise AutomationError("Fare calculation popup copy is currently implemented for macOS only.")
 
     def _resolve_window(self) -> Any | None:
         try:
@@ -403,7 +413,13 @@ class MacOSIETermAutomation(IETermAutomation):
         current_state = self.detect_state()
         if current_state == SessionState.LOGGED_IN:
             self._confirm_system_prompt_if_present(use_enter_fallback=True)
+            self._focus_terminal_input()
             return current_state
+        if current_state == SessionState.SESSION_EXPIRED:
+            self.close_app()
+            if not self.ensure_window():
+                return SessionState.LOGGED_OUT
+            current_state = self.detect_state()
         if current_state not in {SessionState.LOGIN_SCREEN, SessionState.SESSION_EXPIRED}:
             return current_state
 
@@ -414,6 +430,7 @@ class MacOSIETermAutomation(IETermAutomation):
             state = self.detect_state()
             if state != SessionState.LOGIN_SCREEN:
                 self._confirm_system_prompt_if_present(use_enter_fallback=True)
+                self._focus_terminal_input()
                 return state
             time.sleep(0.5)
         return self.detect_state()
@@ -445,12 +462,13 @@ class MacOSIETermAutomation(IETermAutomation):
             )
 
         self._activate_app()
+        self._focus_terminal_input()
         self._paste_text(command)
         self._run_osascript(
             f'''
             tell application "{self._settings.mac_app_name}" to activate
             tell application "System Events"
-                key code 36
+                key code 76
             end tell
             '''
         )
@@ -499,6 +517,24 @@ class MacOSIETermAutomation(IETermAutomation):
                     return screenshot.read()
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             raise AutomationError("Failed to capture the current screen. Check macOS Screen Recording permission.") from exc
+
+    def copy_fare_calculation_text(self) -> str:
+        self._ensure_macos()
+        if not self.ensure_window():
+            raise AutomationError("iEterm Mac app was not found.")
+
+        self._activate_app()
+        self._click_named_element_or_coordinate(
+            "票价计算",
+            coordinate_script=self._fare_calculation_coordinate_script(),
+        )
+        time.sleep(self._settings.post_action_delay_seconds)
+        self._set_clipboard_text("")
+        self._click_named_element_or_coordinate("复制内容")
+        copied_text = self._wait_for_clipboard_text()
+        if not copied_text:
+            raise AutomationError("Fare calculation popup did not copy any text.")
+        return copied_text
 
     def _activate_app(self) -> None:
         self._run_osascript(f'tell application "{self._settings.mac_app_name}" to activate')
@@ -645,6 +681,69 @@ class MacOSIETermAutomation(IETermAutomation):
         '''
         self._run_osascript(script)
         time.sleep(self._settings.post_action_delay_seconds)
+
+    def _focus_terminal_input(self) -> None:
+        process_name = self._applescript_text(self._process_name())
+        script = f'''
+        tell application "{self._settings.mac_app_name}" to activate
+        tell application "System Events"
+            tell process "{process_name}"
+                set frontmost to true
+                delay 0.2
+                if not (exists window 1) then return
+                try
+                    set winPos to position of window 1
+                    set winSize to size of window 1
+                    set clickX to (item 1 of winPos) + ((item 1 of winSize) * 0.02)
+                    set clickY to (item 2 of winPos) + ((item 2 of winSize) * 0.14)
+                    click at {{clickX, clickY}}
+                end try
+                delay 0.1
+                key code 53
+            end tell
+        end tell
+        '''
+        self._run_osascript(script)
+        time.sleep(self._settings.post_action_delay_seconds)
+
+    def _click_named_element_or_coordinate(self, name: str, *, coordinate_script: str = "") -> None:
+        process_name = self._applescript_text(self._process_name())
+        element_name = self._applescript_text(name)
+        script = f'''
+        tell application "{self._settings.mac_app_name}" to activate
+        tell application "System Events"
+            tell process "{process_name}"
+                set frontmost to true
+                delay 0.2
+                repeat with appWindow in windows
+                    repeat with uiElement in entire contents of appWindow
+                        try
+                            set itemName to name of uiElement as text
+                            if itemName is "{element_name}" or itemName contains "{element_name}" then
+                                click uiElement
+                                return
+                            end if
+                        end try
+                    end repeat
+                end repeat
+                {coordinate_script}
+            end tell
+        end tell
+        '''
+        self._run_osascript(script)
+        time.sleep(self._settings.post_action_delay_seconds)
+
+    def _fare_calculation_coordinate_script(self) -> str:
+        return '''
+                try
+                    if not (exists window 1) then return
+                    set winPos to position of window 1
+                    set winSize to size of window 1
+                    set clickX to (item 1 of winPos) + ((item 1 of winSize) * 0.40)
+                    set clickY to (item 2 of winPos) + ((item 2 of winSize) * 0.82)
+                    click at {clickX, clickY}
+                end try
+        '''
 
     def _request_app_close(self) -> None:
         process_name = self._applescript_text(self._process_name())
@@ -864,6 +963,28 @@ up?.post(tap: .cghidEventTap)
             end tell
             '''
         )
+
+    def _set_clipboard_text(self, text: str) -> None:
+        try:
+            import pyperclip
+        except Exception as exc:
+            raise AutomationError("pyperclip is required for the macOS automation backend.") from exc
+
+        pyperclip.copy(text)
+
+    def _wait_for_clipboard_text(self, *, timeout_seconds: float = 5.0) -> str:
+        try:
+            import pyperclip
+        except Exception as exc:
+            raise AutomationError("pyperclip is required for the macOS automation backend.") from exc
+
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            text = pyperclip.paste() or ""
+            if text:
+                return text
+            time.sleep(0.2)
+        return ""
 
     def _read_by_clipboard(self) -> str:
         try:

@@ -11,6 +11,14 @@ FLIGHT_LINE = re.compile(
     r"(?:\s+(?P<cabin>[A-Z]))?"
     r"(?:\s*(?P<availability>[0-9A-Z]))?"
 )
+AVH_FLIGHT_LINE = re.compile(
+    r"(?P<flight>[A-Z0-9]{2}\d{3,4})\b"
+    r"(?P<body>.*?)"
+    r"\b(?P<route>[A-Z]{3,6})\s+"
+    r"(?P<depart>\d{4})\s+"
+    r"(?P<arrive>\d{4}(?:\+\d)?)\b"
+)
+CABIN_AVAILABILITY = re.compile(r"\b(?P<cabin>[A-Z])(?P<availability>[0-9A-Z])\b")
 FARE_AMOUNT = re.compile(r"\b(?P<currency>[A-Z]{3})\s*(?P<amount>\d+(?:\.\d{1,2})?)\b")
 FARE_RULE = re.compile(r"\b(?:RULE|RULES?|R)\s*[:\-]?\s*(?P<rule>[A-Z0-9]{1,12})\b")
 PASSENGER_TYPE = re.compile(r"\b(?P<passenger_type>ADT|CNN|CHD|INF|SRC|STU)\b")
@@ -25,9 +33,25 @@ def parse_flight_options(raw_text: str) -> list[FlightOption]:
 
     flights: list[FlightOption] = []
     for line in raw_text.splitlines():
-        match = FLIGHT_LINE.search(line.strip())
+        normalized = line.strip()
+        match = AVH_FLIGHT_LINE.search(normalized)
+        if match:
+            cabin, availability = _extract_cabin_availability(match.group("body"))
+            flights.append(
+                FlightOption(
+                    flight_no=match.group("flight"),
+                    depart_time=_format_time(match.group("depart")),
+                    arrive_time=_format_time(match.group("arrive").split("+", 1)[0]),
+                    cabin=cabin,
+                    availability=availability,
+                )
+            )
+            continue
+
+        match = FLIGHT_LINE.search(normalized)
         if not match:
             continue
+
         flights.append(
             FlightOption(
                 flight_no=match.group("flight"),
@@ -80,6 +104,16 @@ def _format_time(value: str) -> str:
     if len(value) != 4 or not value.isdigit():
         return value
     return f"{value[:2]}:{value[2:]}"
+
+
+def _extract_cabin_availability(text: str) -> tuple[str | None, str | None]:
+    cabin_matches = list(CABIN_AVAILABILITY.finditer(text))
+    if not cabin_matches:
+        return None, None
+
+    # Y is the most common economy class signal users care about first.
+    preferred = next((match for match in cabin_matches if match.group("cabin") == "Y"), cabin_matches[0])
+    return preferred.group("cabin"), preferred.group("availability")
 
 
 def _guess_airline(tokens: list[str], currency: str) -> str | None:

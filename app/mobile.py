@@ -25,8 +25,20 @@ def render_mobile_console() -> str:
     button.secondary { background: #526071; }
     button.danger { background: #c62828; }
     pre { white-space: pre-wrap; word-break: break-word; background: #101828; color: #d6e4ff; padding: 12px; border-radius: 10px; overflow: auto; }
-    img.screenshot { display: none; width: 100%; border-radius: 12px; border: 1px solid #cfd7e6; background: #101828; }
+    img.screenshot { display: none; width: 100%; border-radius: 12px; border: 1px solid #cfd7e6; background: #101828; cursor: zoom-in; }
     img.screenshot.active { display: block; }
+    .modal {
+      display: none; position: fixed; inset: 0; z-index: 100;
+      background: rgba(0, 0, 0, .88); padding: 14px; box-sizing: border-box;
+    }
+    .modal.active { display: flex; flex-direction: column; gap: 10px; }
+    .modal-header { display: flex; align-items: center; justify-content: space-between; color: white; gap: 10px; }
+    .modal-title { font-weight: 700; }
+    .modal-close { width: auto; min-width: 88px; margin: 0; background: #344054; }
+    .modal-body { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; display: flex; align-items: flex-start; }
+    .modal-body img { width: max-content; min-width: 100%; max-width: none; height: auto; border-radius: 10px; background: #101828; }
+    .history { display: grid; gap: 8px; margin-top: 10px; }
+    .history button { margin-top: 0; text-align: left; background: #eef4ff; color: #174ea6; border: 1px solid #bfd3ff; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .hint { color: #667085; font-size: 13px; line-height: 1.5; }
     .ok { color: #07883d; font-weight: 700; }
@@ -47,6 +59,7 @@ def render_mobile_console() -> str:
       section { background: #182230; }
       input, select, textarea { background: #101828; color: #f4f7fb; border-color: #344054; }
       img.screenshot { border-color: #344054; }
+      .history button { background: #102a56; color: #d6e4ff; border-color: #244a8f; }
       .hint { color: #a8b3c7; }
       .loading { background: #3b2b08; color: #ffd778; }
       .spinner { border-color: rgba(255, 215, 120, .25); border-top-color: #ffd778; }
@@ -95,10 +108,15 @@ def render_mobile_console() -> str:
 
   <section>
     <h2>原始查询指令</h2>
-    <label for="command">只允许查询类指令</label>
-    <input id="command" placeholder="例如 XS FSD BJSTYO/CA" />
-    <button onclick="runRawCommand()">发送查询指令</button>
-    <p class="hint">系统会拦截订座、出票、退票、废票等高风险指令。</p>
+    <label for="command">输入任意 iEterm 指令</label>
+    <input id="command" placeholder="例如 AVH/CANHRE30JUN/ADD 或 SD1L1" />
+    <button onclick="runRawCommand()">发送指令</button>
+    <button class="secondary" onclick="copyFareCalculation()">票价计算并复制弹窗</button>
+    <p class="hint">这里不再限制指令类型，请确认指令正确后再发送。</p>
+    <h3>历史指令</h3>
+    <p class="hint">点击历史指令会直接再次发送。</p>
+    <div id="commandHistory" class="history"></div>
+    <button class="secondary" onclick="clearCommandHistory()">清空历史指令</button>
   </section>
 
   <section>
@@ -113,6 +131,15 @@ def render_mobile_console() -> str:
     <img id="screenshot" class="screenshot" alt="当前 iEterm 状态截图" />
   </section>
 </main>
+<div id="screenshotModal" class="modal" onclick="closeScreenshotModal(event)">
+  <div class="modal-header">
+    <span class="modal-title">当前 iEterm 大图</span>
+    <button class="modal-close" onclick="closeScreenshotModal(event)">关闭</button>
+  </div>
+  <div class="modal-body">
+    <img id="screenshotLarge" alt="当前 iEterm 大图" />
+  </div>
+</div>
 
 <script>
 const output = document.getElementById("output");
@@ -121,10 +148,15 @@ const loadingBox = document.getElementById("loading");
 const loadingText = document.getElementById("loadingText");
 const screenshot = document.getElementById("screenshot");
 const screenshotHint = document.getElementById("screenshotHint");
+const screenshotModal = document.getElementById("screenshotModal");
+const screenshotLarge = document.getElementById("screenshotLarge");
+const commandHistory = document.getElementById("commandHistory");
 let screenshotObjectUrl = null;
+const commandHistoryKey = "ieterm_command_history";
 
 document.getElementById("token").value = localStorage.getItem("ieterm_token") || "";
 document.getElementById("departure_date").valueAsDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
+renderCommandHistory();
 
 function saveToken() {
   localStorage.setItem("ieterm_token", document.getElementById("token").value.trim());
@@ -148,6 +180,47 @@ async function api(path, options = {}) {
 
 function show(data) {
   output.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+}
+
+function getCommandHistory() {
+  try {
+    const value = JSON.parse(localStorage.getItem(commandHistoryKey) || "[]");
+    return Array.isArray(value) ? value.filter(item => typeof item === "string" && item.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCommandToHistory(command) {
+  const normalized = command.trim();
+  if (!normalized) return;
+  const history = getCommandHistory().filter(item => item !== normalized);
+  history.unshift(normalized);
+  localStorage.setItem(commandHistoryKey, JSON.stringify(history.slice(0, 30)));
+  renderCommandHistory();
+}
+
+function renderCommandHistory() {
+  if (!commandHistory) return;
+  const history = getCommandHistory();
+  commandHistory.innerHTML = "";
+  if (!history.length) {
+    commandHistory.innerHTML = '<div class="hint">暂无历史指令</div>';
+    return;
+  }
+  for (const command of history) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = command;
+    button.onclick = () => sendCommand(command);
+    commandHistory.appendChild(button);
+  }
+}
+
+function clearCommandHistory() {
+  if (!confirm("确定清空历史指令吗？")) return;
+  localStorage.removeItem(commandHistoryKey);
+  renderCommandHistory();
 }
 
 function setLoading(active, message = "执行中...") {
@@ -177,12 +250,23 @@ async function refreshScreenshot(options = {}) {
     if (screenshotObjectUrl) URL.revokeObjectURL(screenshotObjectUrl);
     screenshotObjectUrl = URL.createObjectURL(blob);
     screenshot.src = screenshotObjectUrl;
+    screenshotLarge.src = screenshotObjectUrl;
     screenshot.classList.add("active");
     screenshotHint.textContent = `截图已更新：${new Date().toLocaleTimeString()}`;
   } catch (error) {
     if (!options.silent) show(String(error));
     screenshotHint.textContent = "暂时无法获取截图，请确认 iEterm 已打开并且服务有屏幕录制/辅助功能权限。";
   }
+}
+
+screenshot.addEventListener("click", () => {
+  if (!screenshot.src) return;
+  screenshotModal.classList.add("active");
+});
+
+function closeScreenshotModal(event) {
+  if (event) event.stopPropagation();
+  screenshotModal.classList.remove("active");
 }
 
 async function loadStatus() {
@@ -247,9 +331,23 @@ async function queryFare() {
 }
 
 async function runRawCommand() {
+  const command = document.getElementById("command").value.trim();
+  return sendCommand(command);
+}
+
+async function sendCommand(command) {
+  document.getElementById("command").value = command;
   return withLoading("正在发送原始查询指令...", async () => {
-    const command = document.getElementById("command").value.trim();
-    show(await api("/query/raw-command", {method: "POST", body: JSON.stringify({command, parse_fares: true})}));
+    const data = await api("/query/raw-command", {method: "POST", body: JSON.stringify({command, parse_fares: true})});
+    saveCommandToHistory(command);
+    show(data);
+  }).catch(error => show(String(error)));
+}
+
+async function copyFareCalculation() {
+  return withLoading("正在点击票价计算并复制弹窗内容...", async () => {
+    const data = await api("/query/fare-calculation", {method: "POST", body: "{}"});
+    output.textContent = data.raw_text || JSON.stringify(data, null, 2);
   }).catch(error => show(String(error)));
 }
 </script>
